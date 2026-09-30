@@ -112,6 +112,54 @@ impl PriceLevel {
 
         Ok(())
     }
+
+    /// Applies one execution to the maker currently owning FIFO priority.
+    ///
+    /// Returns `true` when the maker was completely filled and therefore removed from the front of this price level.
+    pub(crate) fn apply_front_execution(
+        &mut self,
+        order_id: OrderId,
+        executed_quantity: QuantityLots,
+        maker_quantity_before: QuantityLots,
+    ) -> Result<bool, OrderBookError> {
+        if executed_quantity.is_zero()
+            || maker_quantity_before.is_zero()
+            || executed_quantity > maker_quantity_before
+        {
+            return Err(OrderBookError::InconsistentState(order_id));
+        }
+
+        if self.front_order_id() != Some(order_id) {
+            return Err(OrderBookError::InconsistentState(order_id));
+        }
+
+        let updated_total = i128::from(self.aggregate_quantity.get())
+            .checked_sub(i128::from(executed_quantity.get()))
+            .ok_or(OrderBookError::InconsistentState(order_id))?;
+
+        let updated_total = i64::try_from(updated_total)
+            .map_err(|_| OrderBookError::InconsistentState(order_id))?;
+
+        let updated_total = QuantityLots::new(updated_total)
+            .map_err(|_| OrderBookError::InconsistentState(order_id))?;
+
+        let maker_fully_filled = executed_quantity == maker_quantity_before;
+
+        // Every resting order is strictly positive. Therefore the aggregate becomes zero exactly when this execution removes the sole order.
+        let queue_will_be_empty = maker_fully_filled && self.order_ids.len() == 1;
+
+        if queue_will_be_empty != updated_total.is_zero() {
+            return Err(OrderBookError::InconsistentState(order_id));
+        }
+
+        if maker_fully_filled {
+            let _removed_id = self.order_ids.pop_front();
+        }
+
+        self.aggregate_quantity = updated_total;
+
+        Ok(maker_fully_filled)
+    }
 }
 
 #[cfg(test)]
@@ -177,5 +225,52 @@ mod tests {
         );
 
         assert_eq!(level.aggregate_quantity(), quantity(14));
+    }
+
+    #[test]
+    fn partial_execution_preserves_front_fifo_position() {
+        let mut level = PriceLevel::new(price());
+
+        level
+            .push_back(OrderId::new(10), quantity(10))
+            .expect("first insertion");
+
+        level
+            .push_back(OrderId::new(20), quantity(20))
+            .expect("second insertion");
+
+        let fully_filled = level
+            .apply_front_execution(OrderId::new(10), quantity(4), quantity(10))
+            .expect("valid partial execution");
+
+        assert!(!fully_filled);
+
+        assert_eq!(
+            level.order_ids().collect::<Vec<_>>(),
+            vec![OrderId::new(10), OrderId::new(20)],
+        );
+
+        assert_eq!(level.aggregate_quantity(), quantity(26));
+    }
+
+    #[test]
+    fn full_execution_advances_fifo_front() {
+        let mut level = PriceLevel::new(price());
+
+        level
+            .push_back(OrderId::new(10), quantity(10))
+            .expect("first insertion");
+
+        level
+            .push_back(OrderId::new(20), quantity(20))
+            .expect("second insertion");
+
+        let fully_filled = level
+            .apply_front_execution(OrderId::new(10), quantity(10), quantity(10))
+            .expect("valid full execution");
+
+        assert!(fully_filled);
+        assert_eq!(level.front_order_id(), Some(OrderId::new(20)));
+        assert_eq!(level.aggregate_quantity(), quantity(20));
     }
 }

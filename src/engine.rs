@@ -1,11 +1,15 @@
-use crate::config::EngineConfig;
-use crate::error::EngineError;
+use crate::{
+    book::{Order, OrderBook},
+    command::{Command, PlaceLimitOrder},
+    config::EngineConfig,
+    error::EngineError,
+    event::{Event, Execution, OrderRejected, OrderRejectionReason},
+    matching::{ExecutionPlan, plan_limit_order},
+};
 
-/// Internal deterministic arrival sequence.
+/// Internal deterministic command-arrival sequence.
 ///
 /// This is deliberately not a wall-clock timestamp.
-///
-/// It is private because sequence representation is currently an engine implementation detail rather than part of the external contract.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct SequenceNumber(u64);
@@ -24,21 +28,19 @@ impl SequenceNumber {
 
 /// Deterministic matching state for exactly one market.
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct MatchingEngine {
     config: EngineConfig,
-
-    // This becomes actively used when the first order-processing command is introduced.
-    // It exists now because deterministic price-time sequencing is part of the engine foundation.
-    #[allow(dead_code)]
+    book: OrderBook,
     next_sequence: SequenceNumber,
 }
 
 impl MatchingEngine {
     #[must_use]
-    pub const fn new(config: EngineConfig) -> Self {
+    pub fn new(config: EngineConfig) -> Self {
         Self {
             config,
+            book: OrderBook::new(),
             next_sequence: SequenceNumber::ZERO,
         }
     }
@@ -48,10 +50,127 @@ impl MatchingEngine {
         &self.config
     }
 
-    /// Reserves the next deterministic logical sequence number.
+    /// Returns read-only access to current deterministic order-book state.
+    #[must_use]
+    pub const fn book(&self) -> &OrderBook {
+        &self.book
+    }
+
+    /// Processes exactly one canonical command synchronously.
     ///
-    /// This remains private until actual command processing is introduced.
-    #[allow(dead_code)]
+    /// Returned events are already in canonical deterministic order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError`] only when the engine cannot safely complete deterministic processing.
+    pub fn process(&mut self, command: Command) -> Result<Vec<Event>, EngineError> {
+        self.reserve_sequence()?;
+
+        match command {
+            Command::PlaceLimitOrder(place_order) => self.process_limit_order(place_order),
+        }
+    }
+
+    fn process_limit_order(&mut self, command: PlaceLimitOrder) -> Result<Vec<Event>, EngineError> {
+        if self.book.contains_order(command.order_id()) {
+            return Ok(vec![
+                self.rejection_event(command, OrderRejectionReason::DuplicateOrderId),
+            ]);
+        }
+
+        // PLAN
+        //
+        // No book mutation occurs while the execution plan is being built.
+        let plan = plan_limit_order(&self.book, command)?;
+
+        // VALIDATE
+        //
+        // Any positive taker remainder will become a new resting order.
+        //
+        // Validate its aggregate before mutating makers.
+        if !plan.remaining_quantity().is_zero()
+            && !self.book.can_rest_quantity(
+                command.side(),
+                command.price(),
+                plan.remaining_quantity(),
+            )
+        {
+            return Ok(vec![self.rejection_event(
+                command,
+                OrderRejectionReason::RestingAggregateQuantityOutOfRange,
+            )]);
+        }
+
+        // Construct the possible resting remainder before applying executions.
+        // Therefore no ordinary constructor failure can occur after book mutation begins.
+        let resting_order = Self::prepare_remainder(command, &plan)?;
+
+        // APPLY
+        //
+        // Every planned maker must still be the FIFO front because the engine is single-threaded and nothing mutated the book between planning and application.
+        for planned_execution in plan.fills() {
+            self.book
+                .apply_execution(
+                    planned_execution.maker_order_id(),
+                    planned_execution.quantity(),
+                )
+                .map_err(|_| EngineError::OrderBookInvariantViolation)?;
+        }
+
+        if let Some(order) = resting_order {
+            self.book
+                .insert(order)
+                .map_err(|_| EngineError::OrderBookInvariantViolation)?;
+        }
+
+        Ok(self.execution_events(command, plan))
+    }
+
+    fn prepare_remainder(
+        command: PlaceLimitOrder,
+        plan: &ExecutionPlan,
+    ) -> Result<Option<Order>, EngineError> {
+        let remaining_quantity = plan.remaining_quantity();
+
+        if remaining_quantity.is_zero() {
+            return Ok(None);
+        }
+
+        let order = Order::new(
+            command.order_id(),
+            command.side(),
+            command.price(),
+            remaining_quantity,
+        )
+        .map_err(|_| EngineError::OrderBookInvariantViolation)?;
+
+        Ok(Some(order))
+    }
+
+    fn execution_events(&self, command: PlaceLimitOrder, plan: ExecutionPlan) -> Vec<Event> {
+        plan.into_fills()
+            .into_iter()
+            .map(|planned_execution| {
+                Event::Execution(Execution::new(
+                    self.config.market_id(),
+                    planned_execution.maker_order_id(),
+                    command.order_id(),
+                    command.side(),
+                    planned_execution.price(),
+                    planned_execution.quantity(),
+                ))
+            })
+            .collect()
+    }
+
+    fn rejection_event(&self, command: PlaceLimitOrder, reason: OrderRejectionReason) -> Event {
+        Event::OrderRejected(OrderRejected::new(
+            self.config.market_id(),
+            command.order_id(),
+            reason,
+        ))
+    }
+
     fn reserve_sequence(&mut self) -> Result<SequenceNumber, EngineError> {
         self.next_sequence.advance()
     }

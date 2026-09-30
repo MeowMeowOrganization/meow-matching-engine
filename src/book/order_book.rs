@@ -12,7 +12,7 @@ use super::{error::OrderBookError, order::Order, price_level::PriceLevel};
 ///
 /// `HashMap` exists only as an order-ID lookup index. Its iteration order must never be used for matching priority or deterministic output.
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct OrderBook {
     bids: BTreeMap<PriceTicks, PriceLevel>,
     asks: BTreeMap<PriceTicks, PriceLevel>,
@@ -40,32 +40,34 @@ impl OrderBook {
         let price = order.price();
         let quantity = order.quantity();
 
-        let order_entry = match self.orders.entry(order_id) {
+        let Self { bids, asks, orders } = self;
+
+        let vacant_order = match orders.entry(order_id) {
             HashEntry::Occupied(_) => {
                 return Err(OrderBookError::DuplicateOrderId(order_id));
             }
 
-            HashEntry::Vacant(entry) => entry,
+            HashEntry::Vacant(slot) => slot,
         };
 
-        let levels = match side {
-            Side::Buy => &mut self.bids,
-            Side::Sell => &mut self.asks,
+        let side_levels = match side {
+            Side::Buy => bids,
+            Side::Sell => asks,
         };
 
-        match levels.entry(price) {
-            BTreeEntry::Occupied(mut entry) => {
-                entry.get_mut().push_back(order_id, quantity)?;
+        match side_levels.entry(price) {
+            BTreeEntry::Occupied(mut occupied) => {
+                occupied.get_mut().push_back(order_id, quantity)?;
             }
 
-            BTreeEntry::Vacant(entry) => {
-                let mut level = PriceLevel::new(price);
-                level.push_back(order_id, quantity)?;
-                entry.insert(level);
+            BTreeEntry::Vacant(vacant) => {
+                let mut price_level = PriceLevel::new(price);
+                price_level.push_back(order_id, quantity)?;
+                vacant.insert(price_level);
             }
         }
 
-        order_entry.insert(order);
+        vacant_order.insert(order);
 
         Ok(())
     }
@@ -90,21 +92,21 @@ impl OrderBook {
         let quantity = order.quantity();
 
         let level_is_empty = {
-            let levels = self.levels_mut(side);
+            let side_levels = self.levels_mut(side);
 
-            let level = levels
+            let price_level = side_levels
                 .get_mut(&price)
                 .ok_or(OrderBookError::InconsistentState(order_id))?;
 
-            level.remove(order_id, quantity)?;
+            price_level.remove(order_id, quantity)?;
 
-            level.is_empty()
+            price_level.is_empty()
         };
 
         if level_is_empty {
-            let removed_level = self.levels_mut(side).remove(&price);
+            let deleted_level = self.levels_mut(side).remove(&price);
 
-            if removed_level.is_none() {
+            if deleted_level.is_none() {
                 return Err(OrderBookError::InconsistentState(order_id));
             }
         }
@@ -150,13 +152,17 @@ impl OrderBook {
     /// Returns the highest bid price level.
     #[must_use]
     pub fn best_bid(&self) -> Option<&PriceLevel> {
-        self.bids.last_key_value().map(|(_, level)| level)
+        self.bids
+            .last_key_value()
+            .map(|(_, price_level)| price_level)
     }
 
     /// Returns the lowest ask price level.
     #[must_use]
     pub fn best_ask(&self) -> Option<&PriceLevel> {
-        self.asks.first_key_value().map(|(_, level)| level)
+        self.asks
+            .first_key_value()
+            .map(|(_, price_level)| price_level)
     }
 
     #[must_use]
@@ -178,6 +184,110 @@ impl OrderBook {
     /// Ask levels from best price to worst price.
     pub fn ask_levels(&self) -> impl Iterator<Item = &PriceLevel> {
         self.asks.values()
+    }
+
+    /// Returns whether this quantity can safely join a resting price level without making its aggregate exceed canonical `i64`.
+    #[must_use]
+    pub(crate) fn can_rest_quantity(
+        &self,
+        side: Side,
+        price: PriceTicks,
+        quantity: QuantityLots,
+    ) -> bool {
+        let current = self.aggregate_quantity(side, price);
+
+        let Some(combined) = i128::from(current.get()).checked_add(i128::from(quantity.get()))
+        else {
+            return false;
+        };
+
+        i64::try_from(combined).is_ok()
+    }
+
+    /// Applies one planned execution to the resting maker.
+    ///
+    /// The maker must currently own FIFO priority at its price level.
+    ///
+    /// A partial maker remains at the front of the queue.
+    ///
+    /// A completely filled maker is removed from both the FIFO and canonical order storage.
+    /// Empty levels are removed immediately.
+    pub(crate) fn apply_execution(
+        &mut self,
+        order_id: OrderId,
+        executed_quantity: QuantityLots,
+    ) -> Result<(), OrderBookError> {
+        let Some(order) = self.orders.get(&order_id) else {
+            return Err(OrderBookError::InconsistentState(order_id));
+        };
+
+        let side = order.side();
+        let price = order.price();
+        let maker_quantity_before = order.quantity();
+
+        if executed_quantity.is_zero() || executed_quantity > maker_quantity_before {
+            return Err(OrderBookError::InconsistentState(order_id));
+        }
+
+        let remaining = i128::from(maker_quantity_before.get())
+            .checked_sub(i128::from(executed_quantity.get()))
+            .ok_or(OrderBookError::InconsistentState(order_id))?;
+
+        let remaining =
+            i64::try_from(remaining).map_err(|_| OrderBookError::InconsistentState(order_id))?;
+
+        let remaining = QuantityLots::new(remaining)
+            .map_err(|_| OrderBookError::InconsistentState(order_id))?;
+
+        let maker_fully_filled = remaining.is_zero();
+
+        let level_became_empty = {
+            let side_levels = self.levels_mut(side);
+
+            let price_level = side_levels
+                .get_mut(&price)
+                .ok_or(OrderBookError::InconsistentState(order_id))?;
+
+            let level_removed_maker = price_level.apply_front_execution(
+                order_id,
+                executed_quantity,
+                maker_quantity_before,
+            )?;
+
+            if level_removed_maker != maker_fully_filled {
+                return Err(OrderBookError::InconsistentState(order_id));
+            }
+
+            price_level.is_empty()
+        };
+
+        if maker_fully_filled {
+            self.orders
+                .remove(&order_id)
+                .ok_or(OrderBookError::InconsistentState(order_id))?;
+
+            if level_became_empty {
+                let deleted_level = self.levels_mut(side).remove(&price);
+
+                if deleted_level.is_none() {
+                    return Err(OrderBookError::InconsistentState(order_id));
+                }
+            }
+
+            return Ok(());
+        }
+
+        if level_became_empty {
+            return Err(OrderBookError::InconsistentState(order_id));
+        }
+
+        self.orders
+            .get_mut(&order_id)
+            .ok_or(OrderBookError::InconsistentState(order_id))?
+            .set_remaining_quantity(remaining)
+            .map_err(|_| OrderBookError::InconsistentState(order_id))?;
+
+        Ok(())
     }
 
     fn levels(&self, side: Side) -> &BTreeMap<PriceTicks, PriceLevel> {

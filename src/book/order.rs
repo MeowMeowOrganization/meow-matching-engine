@@ -6,6 +6,8 @@ use super::error::OrderError;
 ///
 /// Prices and  quantities  are already canonicalized before reaching this type.
 /// Human decimals, tick-size conversion and lot-size conversion do not  occur here.
+///
+/// `quantity` always means the order's current resting quantity.
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Order {
@@ -64,6 +66,24 @@ impl Order {
     pub const fn quantity(&self) -> QuantityLots {
         self.quantity
     }
+
+    /// Replaces the current resting quantity after a partial execution.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OrderError::ZeroQuantity`] if the caller attempts to retain a zero-quantity resting order.
+    pub(crate) fn set_remaining_quantity(
+        &mut self,
+        quantity: QuantityLots,
+    ) -> Result<(), OrderError> {
+        if quantity.is_zero() {
+            return Err(OrderError::ZeroQuantity);
+        }
+
+        self.quantity = quantity;
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -108,5 +128,41 @@ mod tests {
         );
 
         assert_eq!(result, Err(OrderError::ZeroQuantity));
+    }
+
+    #[test]
+    fn partial_fill_can_replace_remaining_quantity() {
+        let mut order = Order::new(
+            OrderId::new(1),
+            Side::Sell,
+            PriceTicks::new(100).expect("positive price"),
+            QuantityLots::new(20).expect("positive quantity"),
+        )
+        .expect("valid order");
+
+        order
+            .set_remaining_quantity(QuantityLots::new(13).expect("positive remainder"))
+            .expect("partial remainder remains a valid resting order");
+
+        assert_eq!(
+            order.quantity(),
+            QuantityLots::new(13).expect("positive quantity"),
+        );
+    }
+
+    #[test]
+    fn zero_remaining_quantity_cannot_be_kept_as_resting_order() {
+        let mut order = Order::new(
+            OrderId::new(1),
+            Side::Sell,
+            PriceTicks::new(100).expect("positive price"),
+            QuantityLots::new(20).expect("positive quantity"),
+        )
+        .expect("valid order");
+
+        assert_eq!(
+            order.set_remaining_quantity(QuantityLots::ZERO),
+            Err(OrderError::ZeroQuantity),
+        );
     }
 }

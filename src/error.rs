@@ -11,9 +11,20 @@ pub enum DomainError {
     NegativeQuantityLots(i64),
 }
 
+/// Errors encountered while constructing a canonical engine command.
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum CommandError {
+    #[error("limit-order price must be greater than zero")]
+    ZeroPrice,
+
+    #[error("limit-order quantity must be greater than zero")]
+    ZeroQuantity,
+}
+
 /// Errors indicating that the matching engine cannot safely complete deterministic processing.
 ///
-/// Expected business-level order rejection should eventually be represented as domain events rather than as `EngineError`.
+/// Expected business-level rejection is represented through domain events rather than through this error type.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum EngineError {
@@ -25,4 +36,7 @@ pub enum EngineError {
 
     #[error("financial arithmetic result is outside the canonical i64 range")]
     CanonicalIntegerOutRange,
+
+    #[error("order-book invariant was violated")]
+    OrderBookInvariantViolation,
 }
