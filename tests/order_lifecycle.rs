@@ -40,12 +40,14 @@ fn place(
     matching_engine
         .process(place_command(id, side, price_value, quantity_value))
         .expect("engine remains healthy")
+        .into_domain_events()
 }
 
 fn cancel(matching_engine: &mut MatchingEngine, id: u64) -> Vec<Event> {
     matching_engine
         .process(cancel_command(id))
         .expect("engine remains healthy")
+        .into_domain_events()
 }
 
 fn assert_cancelled(event: &Event, expected_id: u64, expected_quantity: i64) {

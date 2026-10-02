@@ -24,6 +24,7 @@ mod error;
 mod event;
 mod lifecycle;
 mod matching;
+mod sequencing;
 
 pub use book::{Order, OrderBook, OrderBookError, OrderError, PriceLevel};
 pub use command::{CancelOrder, Command, PlaceLimitOrder};
@@ -36,3 +37,4 @@ pub use event::{
     OrderRejectionReason,
 };
 pub use lifecycle::{OrderLifecycle, OrderState};
+pub use sequencing::{EventId, EventOrdinal, MarketSequence, ProcessResult, SequencedEvent};

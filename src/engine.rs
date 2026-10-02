@@ -10,26 +10,8 @@ use crate::{
     },
     lifecycle::{LifecycleError, OrderLifecycle, OrderLifecycleIndex, OrderState},
     matching::{ExecutionPlan, plan_limit_order},
+    sequencing::{MarketSequence, ProcessResult},
 };
-
-/// Internal deterministic command-arrival sequence.
-///
-/// This is deliberately not a wall-clock timestamp.
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct SequenceNumber(u64);
-
-impl SequenceNumber {
-    const ZERO: Self = Self(0);
-
-    fn advance(&mut self) -> Result<Self, EngineError> {
-        let current = *self;
-
-        self.0 = self.0.checked_add(1).ok_or(EngineError::SequenceOverflow)?;
-
-        Ok(current)
-    }
-}
 
 /// Deterministic matching state for exactly one market.
 
@@ -38,7 +20,16 @@ pub struct MatchingEngine {
     config: EngineConfig,
     book: OrderBook,
     lifecycles: OrderLifecycleIndex,
-    next_sequence: SequenceNumber,
+
+    /// Last successfully committed canonical command position.
+    ///
+    /// `0` means this engine has not yet committed any command.
+    last_committed_sequence: MarketSequence,
+
+    /// Fatal errors are fail-stop.
+    ///
+    /// This is operational engine-instance state rather than a business lifecycle state. A halted instance must be discarded and reconstructed from a known committed state before processing can resume.
+    halted: bool,
 }
 
 impl MatchingEngine {
@@ -48,7 +39,8 @@ impl MatchingEngine {
             config,
             book: OrderBook::new(),
             lifecycles: OrderLifecycleIndex::new(),
-            next_sequence: SequenceNumber::ZERO,
+            last_committed_sequence: MarketSequence::ZERO,
+            halted: false,
         }
     }
 
@@ -57,10 +49,22 @@ impl MatchingEngine {
         &self.config
     }
 
-    /// Returns read-only access to current deterministic order-book state.
+    /// Returns read-only access to current active book state.
     #[must_use]
     pub const fn book(&self) -> &OrderBook {
         &self.book
+    }
+
+    /// Last successfully committed per-market command sequence.
+    #[must_use]
+    pub const fn last_committed_sequence(&self) -> MarketSequence {
+        self.last_committed_sequence
+    }
+
+    /// Returns whether this engine instance has encountered a fatal error and must no longer process commands.
+    #[must_use]
+    pub const fn is_halted(&self) -> bool {
+        self.halted
     }
 
     /// Returns deterministic lifecycle information for an order identity.
@@ -73,14 +77,57 @@ impl MatchingEngine {
 
     /// Processes exactly one canonical command synchronously.
     ///
-    /// Returned events are already in canonical deterministic order.
+    /// The command has already been ordered and deduplicated upstream.
+    /// `MatchingEngine` performs no `CommandId` generation or deduplication.
+    ///
+    /// A successful call commits exactly one [`MarketSequence`], including:
+    ///
+    /// - zero-event commands,
+    /// - placement rejection,
+    /// - cancellation rejection,
+    /// - single-event commands,
+    /// - multi-event matching sweeps.
+    ///
+    /// Sequence commit occurs only after the complete deterministic command outcome and event envelopes have been constructed successfully.
     ///
     /// # Errors
     ///
-    /// Returns [`EngineError`] only when the engine cannot safely complete deterministic processing.
-    pub fn process(&mut self, command: Command) -> Result<Vec<Event>, EngineError> {
-        self.reserve_sequence()?;
+    /// Any [`EngineError`] is fatal for this engine instance. The candidate market sequence is not committed and subsequent calls return [`EngineError:EngineHalted`].
+    pub fn process(&mut self, command: Command) -> Result<ProcessResult, EngineError> {
+        if self.halted {
+            return Err(EngineError::EngineHalted);
+        }
 
+        let Some(candidate_sequence) =
+            self.last_committed_sequence.checked_next()
+        else {
+            return Err(self.halt(EngineError::SequenceOverflow));
+        };
+
+        let events = match self.process_command(command) {
+            Ok(events) => events,
+            Err(error) => {
+                return Err(self.halt(error));
+            }
+        };
+
+        let process_result =
+            match ProcessResult::new(self.config.market_id(), candidate_sequence, events) {
+                Ok(result) => result,
+                Err(error) => {
+                    return Err(self.halt(error));
+                }
+            };
+
+        // COMMIT
+        //
+        // Nothing after this point can fall.
+        self.last_committed_sequence = candidate_sequence;
+
+        Ok(process_result)
+    }
+
+    fn process_command(&mut self, command: Command) -> Result<Vec<Event>, EngineError> {
         match command {
             Command::PlaceLimitOrder(place_order) => self.process_limit_order(place_order),
 
@@ -89,7 +136,7 @@ impl MatchingEngine {
     }
 
     fn process_limit_order(&mut self, command: PlaceLimitOrder) -> Result<Vec<Event>, EngineError> {
-        // OrderId reuse is forbidden across the reconstructed engine history, not merely while the ID is actively resting.
+        // This is an order-lifecycle rule, not CommandId deduplication.
         if self
             .validate_order_consistency(command.order_id())?
             .is_some()
@@ -100,9 +147,9 @@ impl MatchingEngine {
             )]);
         }
 
-        // NEW is deliberately transient and local.
+        // NEW is transient and local.
         //
-        // It is not inserted into OrderLifecycleIndex.
+        // It is never inserted into OrderLifecycleIndex.
         let mut incoming_lifecycle =
             OrderLifecycle::new(command.quantity()).map_err(Self::map_lifecycle_error)?;
 
@@ -170,7 +217,7 @@ impl MatchingEngine {
                 .map_err(|_| EngineError::OrderBookInvariantViolation)?;
         }
 
-        // Persist the now-finalized incoming lifecycle only after NEW has transitioned into Open / PartiallyFilled / Filled.
+        // Persist the now-finalized incoming lifecycle only after NEW has transitioned int Open / PartiallyFilled / Filled.
         self.insert_lifecycle(command.order_id(), incoming_lifecycle)?;
 
         self.validate_order_consistency(command.order_id())?;
@@ -405,18 +452,33 @@ impl MatchingEngine {
         EngineError::OrderLifecycleInvariantViolation
     }
 
-    fn reserve_sequence(&mut self) -> Result<SequenceNumber, EngineError> {
-        self.next_sequence.advance()
+    fn halt(&mut self, error: EngineError) -> EngineError {
+        self.halted = true;
+        error
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::MarketId;
+    use crate::{
+        domain::{MarketId, PriceTicks, QuantityLots, Side},
+        sequencing::EventOrdinal,
+    };
 
     fn test_config() -> EngineConfig {
         EngineConfig::new(MarketId::new(1))
+    }
+
+    fn test_place_command(order_id: u64) -> Command {
+        PlaceLimitOrder::new(
+            OrderId::new(order_id),
+            Side::Buy,
+            PriceTicks::new(100).expect("positive price"),
+            QuantityLots::new(1).expect("positive quantity"),
+        )
+        .expect("valid command")
+        .into()
     }
 
     #[test]
@@ -424,35 +486,85 @@ mod tests {
         let engine = MatchingEngine::new(test_config());
 
         assert_eq!(engine.config().market_id(), MarketId::new(1));
+
+        assert!(engine.book().is_empty());
+        assert_eq!(engine.last_committed_sequence(), MarketSequence::ZERO,);
+        assert!(!engine.is_halted());
     }
 
     #[test]
-    fn sequence_starts_at_zero() {
+    fn first_successful_command_commits_sequence_one() {
         let mut engine = MatchingEngine::new(test_config());
 
+        let result = engine
+            .process(test_place_command(1))
+            .expect("engine remains healthy");
+
+        assert_eq!(result.market_sequence(), MarketSequence::new(1),);
+
+        assert_eq!(engine.last_committed_sequence(), MarketSequence::new(1),);
+
+        // No opposite liquidity existed, but the command still committed.
+        assert!(result.events().is_empty());
+    }
+
+    #[test]
+    fn deterministic_business_rejection_commits_sequence() {
+        let mut engine = MatchingEngine::new(test_config());
+
+        engine
+            .process(test_place_command(1))
+            .expect("first command commits");
+
+        let rejection = engine
+            .process(test_place_command(1))
+            .expect("business rejection is successful processing");
+
+        assert_eq!(rejection.market_sequence(), MarketSequence::new(2),);
+
+        assert_eq!(engine.last_committed_sequence(), MarketSequence::new(2),);
+
+        assert_eq!(rejection.events().len(), 1);
+
+        let sequenced_event = rejection.events()[0];
+
         assert_eq!(
-            engine.reserve_sequence().expect("sequence should exist"),
-            SequenceNumber(0),
+            sequenced_event.id().market_sequence(),
+            MarketSequence::new(2),
+        );
+
+        assert_eq!(sequenced_event.id().event_ordinal(), EventOrdinal::ZERO,);
+
+        let Event::OrderRejected(order_rejected) = sequenced_event.into_event() else {
+            panic!("expected duplicate-order rejection");
+        };
+
+        assert_eq!(
+            order_rejected.reason(),
+            OrderRejectionReason::DuplicateOrderId,
         );
     }
 
     #[test]
-    fn sequence_is_monotonic() {
+    fn sequence_overflow_does_not_commit_and_halts_engine() {
         let mut engine = MatchingEngine::new(test_config());
 
-        assert_eq!(
-            engine.reserve_sequence().expect("first sequence"),
-            SequenceNumber(0),
-        );
+        engine.last_committed_sequence = MarketSequence::new(u64::MAX);
+
+        let result = engine.process(test_place_command(1));
+
+        assert_eq!(result, Err(EngineError::SequenceOverflow),);
 
         assert_eq!(
-            engine.reserve_sequence().expect("second sequence"),
-            SequenceNumber(1),
+            engine.last_committed_sequence(),
+            MarketSequence::new(u64::MAX),
         );
 
+        assert!(engine.is_halted());
+
         assert_eq!(
-            engine.reserve_sequence().expect("third sequence"),
-            SequenceNumber(2),
+            engine.process(test_place_command(2)),
+            Err(EngineError::EngineHalted),
         );
     }
 }

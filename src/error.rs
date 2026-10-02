@@ -42,4 +42,10 @@ pub enum EngineError {
 
     #[error("order lifecycle invariant was violated")]
     OrderLifecycleInvariantViolation,
+
+    #[error("event ordinal exceeded the canonical u64 range")]
+    EventOrdinalOverflow,
+
+    #[error("matching engine is halted after a fatal processing error")]
+    EngineHalted,
 }

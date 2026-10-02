@@ -36,6 +36,7 @@ fn process(
     engine
         .process(command(id, side, price_value, quantity_value))
         .expect("engine remains healthy")
+        .into_domain_events()
 }
 
 fn assert_execution(
