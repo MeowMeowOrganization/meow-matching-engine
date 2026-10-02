@@ -70,9 +70,9 @@ pub enum OrderRejectionReason {
     RestingAggregateQuantityOutOfRange,
 }
 
-/// Deterministic business-level rejection.
+/// Deterministic business-level placement rejection.
 ///
-/// This is not an [`crate::EngineError`]. The engine remained healthy and was able to deterministically process the command.
+/// This is not an [`crate::EngineError`].
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OrderRejected {
@@ -110,10 +110,98 @@ impl OrderRejected {
     }
 }
 
+/// Successful cancellation of the complete currently-resting remainder.
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OrderCancelled {
+    market_id: MarketId,
+    order_id: OrderId,
+    cancelled_quantity: QuantityLots,
+}
+
+impl OrderCancelled {
+    pub(crate) const fn new(
+        market_id: MarketId,
+        order_id: OrderId,
+        cancelled_quantity: QuantityLots,
+    ) -> Self {
+        Self {
+            market_id,
+            order_id,
+            cancelled_quantity,
+        }
+    }
+
+    #[must_use]
+    pub const fn market_id(self) -> MarketId {
+        self.market_id
+    }
+
+    #[must_use]
+    pub const fn order_id(self) -> OrderId {
+        self.order_id
+    }
+
+    #[must_use]
+    pub const fn cancelled_quantity(self) -> QuantityLots {
+        self.cancelled_quantity
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelRejectionReason {
+    UnknownOrder,
+    AlreadyFilled,
+    AlreadyCancelled,
+    AlreadyRejected,
+}
+
+/// Deterministic business-level cancellation rejection.
+///
+/// Terminal-order cancellation and unknown-order cancellation are normal domain outcomes, not engine failures.
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CancelRejected {
+    market_id: MarketId,
+    order_id: OrderId,
+    reason: CancelRejectionReason,
+}
+
+impl CancelRejected {
+    pub(crate) const fn new(
+        market_id: MarketId,
+        order_id: OrderId,
+        reason: CancelRejectionReason,
+    ) -> Self {
+        Self {
+            market_id,
+            order_id,
+            reason,
+        }
+    }
+
+    #[must_use]
+    pub const fn market_id(self) -> MarketId {
+        self.market_id
+    }
+
+    #[must_use]
+    pub const fn order_id(self) -> OrderId {
+        self.order_id
+    }
+
+    #[must_use]
+    pub const fn reason(self) -> CancelRejectionReason {
+        self.reason
+    }
+}
+
 /// Ordered deterministic output produced by command processing.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Event {
     Execution(Execution),
     OrderRejected(OrderRejected),
+    OrderCancelled(OrderCancelled),
+    CancelRejected(CancelRejected),
 }

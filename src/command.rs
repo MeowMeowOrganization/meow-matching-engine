@@ -66,16 +66,44 @@ impl PlaceLimitOrder {
     }
 }
 
+/// Cancels the complete currently-restin remainder of one order.
+///
+/// The command deliberately carries only `OrderId`. Side, price, quantity, account identity and wall-clock data are not cancellation inputs to the deterministic matching core.
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CancelOrder {
+    order_id: OrderId,
+}
+
+impl CancelOrder {
+    #[must_use]
+    pub const fn new(order_id: OrderId) -> Self {
+        Self { order_id }
+    }
+
+    #[must_use]
+    pub const fn order_id(self) -> OrderId {
+        self.order_id
+    }
+}
+
 /// Canonical synchronous commands accepted by one matching-engine instance.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
     PlaceLimitOrder(PlaceLimitOrder),
+    CancelOrder(CancelOrder),
 }
 
 impl From<PlaceLimitOrder> for Command {
     fn from(order: PlaceLimitOrder) -> Self {
         Self::PlaceLimitOrder(order)
+    }
+}
+
+impl From<CancelOrder> for Command {
+    fn from(cancel_order: CancelOrder) -> Self {
+        Self::CancelOrder(cancel_order)
     }
 }
 
@@ -129,5 +157,12 @@ mod tests {
         );
 
         assert_eq!(result, Err(CommandError::ZeroQuantity));
+    }
+
+    #[test]
+    fn cancellation_requires_only_order_id() {
+        let command = CancelOrder::new(OrderId::new(42));
+
+        assert_eq!(command.order_id(), OrderId::new(42));
     }
 }

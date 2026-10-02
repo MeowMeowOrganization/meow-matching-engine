@@ -22,12 +22,17 @@ mod domain;
 mod engine;
 mod error;
 mod event;
+mod lifecycle;
 mod matching;
 
 pub use book::{Order, OrderBook, OrderBookError, OrderError, PriceLevel};
-pub use command::{Command, PlaceLimitOrder};
+pub use command::{CancelOrder, Command, PlaceLimitOrder};
 pub use config::EngineConfig;
 pub use domain::{MarketId, OrderId, PriceTicks, QuantityLots, Side};
 pub use engine::MatchingEngine;
 pub use error::{CommandError, DomainError, EngineError};
-pub use event::{Event, Execution, OrderRejected, OrderRejectionReason};
+pub use event::{
+    CancelRejected, CancelRejectionReason, Event, Execution, OrderCancelled, OrderRejected,
+    OrderRejectionReason,
+};
+pub use lifecycle::{OrderLifecycle, OrderState};

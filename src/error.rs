@@ -24,7 +24,7 @@ pub enum CommandError {
 
 /// Errors indicating that the matching engine cannot safely complete deterministic processing.
 ///
-/// Expected business-level rejection is represented through domain events rather than through this error type.
+/// Expected business-level rejection is represented through domain events.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum EngineError {
@@ -39,4 +39,7 @@ pub enum EngineError {
 
     #[error("order-book invariant was violated")]
     OrderBookInvariantViolation,
+
+    #[error("order lifecycle invariant was violated")]
+    OrderLifecycleInvariantViolation,
 }
