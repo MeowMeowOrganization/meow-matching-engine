@@ -259,6 +259,34 @@ impl OrderLifecycleIndex {
             }
         }
     }
+
+    pub(crate) fn canonical_entries(
+        &self,
+    ) -> Result<Vec<(OrderId, OrderLifecycle)>, LifecycleError> {
+        // Native HashMap order is intentionally discarded before any entry becomes observable canonical output.
+        let mut order_ids = self.orders.keys().copied().collect::<Vec<_>>();
+
+        order_ids.sort_unstable_by_key(|order_id| order_id.get());
+
+        let mut entries = Vec::with_capacity(order_ids.len());
+
+        for order_id in order_ids {
+            let lifecycle = *self
+                .orders
+                .get(&order_id)
+                .ok_or(LifecycleError::InvalidInvariant)?;
+
+            lifecycle.validate()?;
+
+            if lifecycle.state() == OrderState::New {
+                return Err(LifecycleError::TransientStatePersisted);
+            }
+
+            entries.push((order_id, lifecycle));
+        }
+
+        Ok(entries)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -415,6 +443,63 @@ mod tests {
         assert_eq!(
             index.insert_finalized(OrderId::new(1), lifecycle),
             Err(LifecycleError::TransientStatePersisted),
+        );
+    }
+
+    #[test]
+    fn canonical_entries_ignore_hashmap_insertion_order() {
+        fn finalized(quantity_value: i64) -> OrderLifecycle {
+            let quantity = QuantityLots::new(quantity_value).expect("valid quantity");
+
+            let mut lifecycle = OrderLifecycle::new(quantity).expect("valid lifecycle");
+
+            lifecycle
+                .complete_placement(quantity)
+                .expect("becomes open");
+
+            lifecycle
+        }
+
+        let mut first = OrderLifecycleIndex::new();
+
+        first
+            .insert_finalized(OrderId::new(30), finalized(3))
+            .expect("insert");
+
+        first
+            .insert_finalized(OrderId::new(10), finalized(1))
+            .expect("insert");
+
+        first
+            .insert_finalized(OrderId::new(20), finalized(2))
+            .expect("insert");
+
+        let mut second = OrderLifecycleIndex::new();
+
+        second
+            .insert_finalized(OrderId::new(20), finalized(2))
+            .expect("insert");
+
+        second
+            .insert_finalized(OrderId::new(30), finalized(3))
+            .expect("insert");
+
+        second
+            .insert_finalized(OrderId::new(10), finalized(1))
+            .expect("insert");
+
+        let first_entries = first.canonical_entries().expect("valid state");
+
+        let second_entries = second.canonical_entries().expect("valid state");
+
+        assert_eq!(first_entries, second_entries,);
+
+        assert_eq!(
+            first_entries
+                .iter()
+                .map(|(order_id, _)| *order_id)
+                .collect::<Vec<_>>(),
+            vec![OrderId::new(10), OrderId::new(20), OrderId::new(30),],
         );
     }
 }

@@ -11,6 +11,7 @@ use crate::{
     lifecycle::{LifecycleError, OrderLifecycle, OrderLifecycleIndex, OrderState},
     matching::{ExecutionPlan, plan_limit_order},
     sequencing::{MarketSequence, ProcessResult},
+    state::{self, StateHash},
 };
 
 /// Deterministic matching state for exactly one market.
@@ -98,9 +99,7 @@ impl MatchingEngine {
             return Err(EngineError::EngineHalted);
         }
 
-        let Some(candidate_sequence) =
-            self.last_committed_sequence.checked_next()
-        else {
+        let Some(candidate_sequence) = self.last_committed_sequence.checked_next() else {
             return Err(self.halt(EngineError::SequenceOverflow));
         };
 
@@ -455,6 +454,73 @@ impl MatchingEngine {
     fn halt(&mut self, error: EngineError) -> EngineError {
         self.halted = true;
         error
+    }
+
+    /// Produces the exact canonical semantic-state representation for this committed matching-engine state.
+    ///
+    /// The returned bytes are independent of `HashMap` seeds, allocation layout, compiler object layout and host endianness.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the engine is halted or if physical state violates the invariants required to construct canonical semantic state.
+    pub fn canonical_state_bytes(&self) -> Result<Vec<u8>, EngineError> {
+        if self.halted {
+            return Err(EngineError::EngineHalted);
+        }
+
+        let lifecycles = self
+            .lifecycles
+            .canonical_entries()
+            .map_err(Self::map_lifecycle_error)?;
+
+        self.validate_canonical_state(&lifecycles)?;
+
+        state::canonical_state_bytes(
+            self.config.market_id(),
+            self.last_committed_sequence,
+            &self.book,
+            &lifecycles,
+        )
+    }
+
+    /// Returns the SHA-256 fingerprint of this engine's exact canonical semantic state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when canonical state cannot safely be produced.
+    pub fn state_hash(&self) -> Result<StateHash, EngineError> {
+        let bytes = self.canonical_state_bytes()?;
+
+        Ok(state::state_hash(&bytes))
+    }
+
+    fn validate_canonical_state(
+        &self,
+        lifecycles: &[(OrderId, OrderLifecycle)],
+    ) -> Result<(), EngineError> {
+        // Every resting order must have an active lifecycle record.
+        //
+        // Price/FIFO traversal is deterministic and performs keyed lookup only.
+        for level in self.book.bid_levels().chain(self.book.ask_levels()) {
+            for order_id in level.order_ids() {
+                let state = self
+                    .validate_order_consistency(order_id)?
+                    .ok_or(EngineError::OrderLifecycleInvariantViolation)?;
+
+                if !state.is_active() {
+                    return Err(EngineError::OrderLifecycleInvariantViolation);
+                }
+            }
+        }
+
+        // Every lifecycle record must agree with its corresponding book presence or absence.
+        //
+        // `lifecycles` has already been sorted by OrderId.
+        for (order_id, _) in lifecycles {
+            self.validate_order_consistency(*order_id)?;
+        }
+
+        Ok(())
     }
 }
 

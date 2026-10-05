@@ -48,4 +48,7 @@ pub enum EngineError {
 
     #[error("matching engine is halted after a fatal processing error")]
     EngineHalted,
+
+    #[error("canonical state value exceeds the supported encoding range")]
+    CanonicalStateOutOfRange,
 }

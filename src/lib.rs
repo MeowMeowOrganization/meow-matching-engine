@@ -25,6 +25,7 @@ mod event;
 mod lifecycle;
 mod matching;
 mod sequencing;
+mod state;
 
 pub use book::{Order, OrderBook, OrderBookError, OrderError, PriceLevel};
 pub use command::{CancelOrder, Command, PlaceLimitOrder};
@@ -38,3 +39,4 @@ pub use event::{
 };
 pub use lifecycle::{OrderLifecycle, OrderState};
 pub use sequencing::{EventId, EventOrdinal, MarketSequence, ProcessResult, SequencedEvent};
+pub use state::StateHash;
