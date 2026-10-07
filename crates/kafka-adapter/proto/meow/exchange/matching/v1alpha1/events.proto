@@ -1,0 +1,59 @@
+syntax = "proto3";
+
+package meow.exchange.matching.v1alpha1;
+
+import "meow/exchange/order/v1alpha1/order.proto";
+
+message MatchingEventId {
+  uint32 market_id = 1;
+  uint64 market_sequence = 2;
+  uint64 event_ordinal = 3;
+}
+
+message SequencedMatchingEvent {
+  MatchingEventId event_id = 1;
+
+  oneof event {
+    Execution execution = 10;
+    OrderRejected order_rejected = 11;
+    OrderCancelled order_cancelled = 12;
+    CancelRejected cancel_rejected = 13;
+  }
+}
+
+message Execution {
+  uint64 maker_order_id = 1;
+  uint64 taker_order_id = 2;
+  meow.exchange.order.v1alpha1.OrderSide taker_side = 3;
+  int64 price_ticks = 4;
+  int64 quantity_lots = 5;
+}
+
+enum MatchingOrderRejectionReason {
+  MATCHING_ORDER_REJECTION_REASON_UNSPECIFIED = 0;
+  MATCHING_ORDER_REJECTION_REASON_DUPLICATE_ORDER_ID = 1;
+  MATCHING_ORDER_REJECTION_REASON_RESTING_AGGREGATE_QUANTITY_OUT_OF_RANGE = 2;
+}
+
+message OrderRejected {
+  uint64 order_id = 1;
+  MatchingOrderRejectionReason reason = 2;
+}
+
+message OrderCancelled {
+  uint64 order_id = 1;
+  int64 cancelled_quantity_lots = 2;
+}
+
+enum MatchingCancelRejectionReason {
+  MATCHING_CANCEL_REJECTION_REASON_UNSPECIFIED = 0;
+  MATCHING_CANCEL_REJECTION_REASON_UNKNOWN_ORDER = 1;
+  MATCHING_CANCEL_REJECTION_REASON_ALREADY_FILLED = 2;
+  MATCHING_CANCEL_REJECTION_REASON_ALREADY_CANCELLED = 3;
+  MATCHING_CANCEL_REJECTION_REASON_ALREADY_REJECTED = 4;
+}
+
+message CancelRejected {
+  uint64 order_id = 1;
+  MatchingCancelRejectionReason reason = 2;
+}

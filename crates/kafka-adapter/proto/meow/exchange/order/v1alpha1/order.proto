@@ -1,0 +1,11 @@
+syntax = "proto3";
+
+package meow.exchange.order.v1alpha1;
+
+// Minimal local dependency required by the matching transport contracts.
+// Keep numeric values aligned with the canonical Order Service contract.
+enum OrderSide {
+  ORDER_SIDE_UNSPECIFIED = 0;
+  ORDER_SIDE_BUY = 1;
+  ORDER_SIDE_SELL = 2;
+}

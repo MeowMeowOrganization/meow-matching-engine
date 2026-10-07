@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+package meow.exchange.matching.v1alpha1;
+
+import "meow/exchange/matching/v1alpha1/commands.proto";
+import "meow/exchange/matching/v1alpha1/events.proto";
+
+message MatchingStateHash {
+  uint32 encoding_version = 1;
+  bytes sha256 = 2;
+}
+
+message MatchingResult {
+  MatchingCommand command = 1;
+  uint64 market_sequence = 2;
+  repeated SequencedMatchingEvent events = 3;
+  MatchingStateHash state_hash_after = 4;
+}

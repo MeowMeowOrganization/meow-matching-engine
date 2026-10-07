@@ -1,0 +1,30 @@
+[package]
+name = "meow-matching-kafka-adapter"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+ctrlc = "3.4"
+meow-matching-engine = { path = "../.."}
+prost = "0.14"
+rdkafka = { version = "0.39", features = ["cmake-build"] }
+thiserror = "2.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+[dev-dependencies]
+futures = "0.3.34"
+prost-build = "0.14"
+protoc-bin-vendored = "3"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"
+
+[build-dependencies]
+prost-build = "0.14"
+protoc-bin-vendored = "3"

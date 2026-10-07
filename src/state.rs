@@ -30,6 +30,13 @@ const STATE_REJECTED: u8 = 0x05;
 pub struct StateHash([u8; 32]);
 
 impl StateHash {
+    /// Version of the canonical semantic-state byte encoding hashed by this
+    /// type.
+    ///
+    /// Transport adapters may publish this alongside the digest so
+    /// replay/audit code can reject incompatible encodings.
+    pub const ENCODING_VERSION: u16 = 1;
+
     #[must_use]
     pub const fn as_bytes(&self) -> &[u8; 32] {
         &self.0

@@ -1,0 +1,26 @@
+syntax = "proto3";
+
+package meow.exchange.matching.v1alpha1;
+
+import "meow/exchange/order/v1alpha1/order.proto";
+
+message MatchingCommand {
+  string command_id = 1;
+  uint32 market_id = 2;
+
+  oneof command {
+    PlaceLimitOrder place_limit_order = 10;
+    CancelOrder cancel_order = 11;
+  }
+}
+
+message PlaceLimitOrder {
+  uint64 order_id = 1;
+  meow.exchange.order.v1alpha1.OrderSide side = 2;
+  int64 price_ticks = 3;
+  int64 quantity_lots = 4;
+}
+
+message CancelOrder {
+  uint64 order_id = 1;
+}
